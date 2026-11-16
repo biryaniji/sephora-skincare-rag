@@ -1,0 +1,19 @@
+# environment and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# data: rebuild with prepare_data.py and build_index.py
+data/raw/
+data/chroma/
+data/processed/*
+!data/processed/cleaning_report.md
+!data/processed/quality_report.md
+
+# local only
+app_backup_label.py
+images/*
+!images/README.txt
+.env
+.streamlit/secrets.toml
