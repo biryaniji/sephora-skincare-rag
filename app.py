@@ -20,7 +20,15 @@ import time
 import streamlit as st
 
 from llm import OllamaBackend, pick_backend
+from languages import BOTH, ENGLISH, HINDI, HINGLISH, LANGUAGES
 from rag import DATA_NOTE, SephoraRAG
+from voice import transcribe
+
+PLACEHOLDER = {ENGLISH: "Ask about your skin, a product, a budget or an ingredient",
+               HINDI: "अपनी त्वचा, प्रोडक्ट, बजट या इंग्रीडिएंट के बारे में पूछें",
+               BOTH: "Ask in English or हिन्दी: skin, product, budget, ingredient",
+               HINGLISH: "Apni skin, product, budget ya ingredient ke baare mein poochiye"}
+VOICE_LANGUAGE = {ENGLISH: "en", HINDI: "hi"}   # the other modes let Whisper detect the language
 
 st.set_page_config(page_title="Skincare Advisor", page_icon="✨", layout="wide", initial_sidebar_state="collapsed")
 
@@ -57,11 +65,11 @@ T = THEMES.get(LOOK, THEMES["Light & luxurious"])
 
 st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?{T["fonts"]}&display=swap');
+@import url('https://fonts.googleapis.com/css2?{T["fonts"]}&family=Noto+Sans+Devanagari:wght@400;500;600&display=swap');
 :root {{ --page:{T["page"]}; --surface:{T["surface"]}; --ink:{T["ink"]}; --muted:{T["muted"]}; --line:{T["line"]};
   --accent:{T["accent"]}; --accentd:{T["accent_dark"]}; --accents:{T["accent_soft"]}; --display:{T["display"]}; }}
 html, body, [data-testid="stAppViewContainer"], [data-testid="stSidebar"], button, input, textarea,
-[data-baseweb="select"] * {{ font-family: {T["body"]}; }}
+[data-baseweb="select"] * {{ font-family: {T["body"].replace("system-ui", "'Noto Sans Devanagari', system-ui")}; }}
 [data-testid="stAppViewContainer"] {{ background: var(--page); }}
 .block-container {{ max-width: 1100px; padding-top: 4.8rem; padding-bottom: 7rem; }}
 .stAppDeployButton, footer {{ display: none !important; }}
@@ -324,7 +332,7 @@ def load_rag(code_version: float) -> SephoraRAG:
 
 def code_version() -> float:
     here = os.path.dirname(os.path.abspath(__file__))
-    return max(os.path.getmtime(os.path.join(here, f)) for f in ("rag.py", "understanding.py", "llm.py"))
+    return max(os.path.getmtime(os.path.join(here, f)) for f in ("rag.py", "understanding.py", "llm.py", "languages.py"))
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -551,6 +559,13 @@ with st.sidebar:
     st.markdown('<div class="side-h">Look</div>', unsafe_allow_html=True)
     st.radio("Look", list(THEMES), key="look", horizontal=True, label_visibility="collapsed")
 
+    st.markdown('<div class="side-h">Answer language</div>', unsafe_allow_html=True)
+    language = st.radio("Answer language", LANGUAGES, key="language", label_visibility="collapsed",
+                        help="You can ask in any of these, in English, Hindi (हिन्दी) or Hinglish. Hindi questions need Claude "
+                             "or a local model to translate them for the search. Product names and prices stay in English.")
+    if language != ENGLISH:
+        st.caption("Hindi works best with Claude. Voice in Hindi downloads a larger speech model (~1 GB) the first time.")
+
     st.markdown('<div class="side-h">Who writes the answers</div>', unsafe_allow_html=True)
     models = ollama_models()
     has_key = bool(os.getenv("ANTHROPIC_API_KEY"))
@@ -576,6 +591,7 @@ with st.sidebar:
             st.error(f"That engine didn't start: {e}")
         st.session_state.backend_sig = sig
     rag.backend = st.session_state.backend
+    rag.language = language
     if rag.backend is not None:
         st.markdown(f'<div class="engine">Answers are written by <b>{esc(rag.backend.model)}</b> {rag.backend.where}.</div>',
                     unsafe_allow_html=True)
@@ -677,7 +693,20 @@ if last and last["role"] == "assistant" and last.get("result") and last["result"
             if cols[i].button(q, key=f"fu_{len(st.session_state.messages)}_{i}", use_container_width=True):
                 ask(q)
 
-question = st.chat_input("Ask about your skin, a product, a budget or an ingredient")
+entry = st.chat_input(PLACEHOLDER.get(language, PLACEHOLDER[ENGLISH]), accept_audio=True)
+question, heard = None, False
+if entry:
+    question = (entry.text or "").strip() or None
+    if question is None and entry.audio is not None:  # the mic button: speech -> text -> same search as typing
+        try:
+            with st.spinner("Listening..." if language == ENGLISH else
+                            "Listening... (the first time in Hindi it downloads a speech model, ~1 GB)"):
+                question = transcribe(entry.audio.getvalue(), VOICE_LANGUAGE.get(language)) or None
+            heard = question is not None
+            if question is None:
+                st.warning("I didn't catch that. Tap the mic and try again, a little closer to the microphone.")
+        except Exception as e:
+            st.error(f"Voice input isn't working ({type(e).__name__}: {e}). You can still type your question.")
 if st.session_state.get("pending"):
     question = st.session_state.pop("pending")
 
@@ -686,6 +715,8 @@ if question:
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
+        if heard:
+            st.caption("🎤 Heard from your voice. Not right? Just type or speak again.")
     with st.chat_message("assistant"):
         st.markdown(WHO, unsafe_allow_html=True)
         result = None
