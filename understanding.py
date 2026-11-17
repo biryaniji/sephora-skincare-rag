@@ -162,6 +162,7 @@ def looks_constraint_only(text: str, has_type_or_brand: bool) -> bool:
 
 # ---------------------------------------------------------------- LLM analyzer
 ANALYZER_PROMPT = """You turn a shopper's latest chat message into a search request for Sephora's skincare catalogue.
+The message may be in English, Hindi (Devanagari) or Hinglish (Hindi in Roman letters). Whatever the language, write "standalone_question" in plain English, translating Hindi skincare words (e.g. तैलीय = oily, शुष्क/ड्राई = dry, मुंहासे = acne, झुर्रियाँ = wrinkles, फेस वॉश = face wash, सनस्क्रीन = sunscreen) and keep product and brand names as written.
 Use the conversation to resolve follow-ups: keep the product type, skin type, budget and other constraints from earlier turns unless the shopper changes them. The newest message wins on conflicts.
 Return ONLY a JSON object with these keys:
 {"standalone_question": "the full request as one self-contained sentence, including carried-over constraints",

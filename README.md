@@ -101,6 +101,20 @@ skincare vocabulary.
 - Sidebar: answer engine and model picker, shopping preferences (skin type, budget, vegan, clean, fragrance-free)
   that act as filters, follow-up suggestions, thumbs feedback, export of the chat as Markdown
 
+## Voice and languages (`voice.py`, `languages.py`)
+- **Voice input**: the chat box has a mic button (`st.chat_input(accept_audio=True)`). The recording is transcribed
+  on the laptop by Whisper (no audio leaves the machine) and then goes through the same search as a typed question.
+  English uses `openai/whisper-base.en` (~290 MB); Hindi and mixed modes use the multilingual `openai/whisper-small`
+  (~1 GB). Both download from Hugging Face the first time they're needed. `python check_voice.py` is a quick check on
+  Windows: it speaks a sentence with Windows text-to-speech and prints what Whisper heard.
+- **Answer language** (sidebar): English, हिन्दी (Hindi), English + हिन्दी (English answer, then the same in Hindi)
+  or Hinglish (Hindi in Roman letters). The catalogue, index and filter rules stay English: a Hindi question is turned
+  into an English search request by the LLM query analyzer, and only the answer is written in the chosen language.
+  Product names, brands, prices, ingredient names and `[n]` citations are kept exactly as in the data. Fixed
+  messages (no match, off-topic, greetings) have Hindi versions.
+- Limits: Hindi questions need an LLM (Claude works best; small local models write weak Hindi). Without one, the app
+  says so in both languages. Buttons and headings are still English.
+
 ## Run it
 ```bash
 python3 -m venv .venv && source .venv/bin/activate

@@ -38,6 +38,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Iterator
 
+from languages import (BOTH, ENGLISH, HINDI, HI_NEEDS_LLM_EN, has_devanagari, localize, max_tokens, prompt_rule,
+                       small_talk_key)
 from llm import pick_backend
 from understanding import (ANALYZER_PROMPT, CHEAPEST, FOLLOW_UP_LEAD, REFERS_BACK, SKINCARE_VOCAB,
                            is_small_talk, looks_constraint_only, parse_analysis, parse_price,
@@ -318,6 +320,7 @@ class SephoraRAG:
                                 and c["id"].endswith("-ov0"))
         self.backend = pick_backend()
         self.use_analyzer = True      # LLM query understanding (one extra short model call per message)
+        self.language = ENGLISH       # answer language, see languages.py
         # Rare words in product names ("protini", "niacinamide") identify a named product.
         names = {c["meta"]["product_id"]: set(tokenize(c["meta"]["product_name"])) for c in chunks}
         self.name_tokens = names
@@ -534,7 +537,8 @@ class SephoraRAG:
         # Layer 2: LLM analyzer, when a model is connected and the message needs interpreting.
         analysis = None
         needs_llm = bool(history) or not (has_anchor or explicit.get("max_price") or explicit.get("types"))
-        if self.backend is not None and needs_llm and self.use_analyzer:
+        non_english = has_devanagari(question)       # Hindi: only the LLM can turn it into an English search
+        if self.backend is not None and (non_english or (needs_llm and self.use_analyzer)):
             analysis = self.analyze(question, history)
         if analysis:
             source = f"{self.backend.label} + rules"
@@ -616,9 +620,10 @@ class SephoraRAG:
         t0 = time.perf_counter()
         history = [{"role": t["role"], "content": t["content"]} for t in (history or []) if t.get("content")]
         timings: dict[str, float] = {}
+        lang = self.language
         result = {"question": question, "search_question": question, "notes": [], "timings": timings,
                   "retrieved": Retrieved(), "fallback": None, "answer": "", "model": None,
-                  "steps": [], "history": history, "understood": ""}
+                  "steps": [], "history": history, "understood": "", "language": lang}
         steps = result["steps"]
 
         original = question
@@ -628,7 +633,11 @@ class SephoraRAG:
             result["corrected"] = question
         if is_small_talk(question):
             steps.append(("Small talk", "greeting or thanks, so no search needed"))
-            result.update(answer=small_talk_reply(question), fallback="small_talk")
+            result.update(answer=self._small_talk(question, lang), fallback="small_talk")
+            return result
+        if has_devanagari(question) and self.backend is None:
+            steps.append(("Language", "Hindi question but no language model connected, so it can't be translated for search"))
+            result.update(answer=localize(HI_NEEDS_LLM_EN, "needs_llm", BOTH), fallback="needs_llm")
             return result
 
         u = self.understand(question, history, previous)
@@ -644,13 +653,14 @@ class SephoraRAG:
             "sort": f.get("sort"), "brand": f.get("brand")}
         steps.append(("Understood as", f"{search_q}  [{result['understood']}]  · via {u['source']}"))
         if u["small_talk"]:
-            result.update(answer=small_talk_reply(question), fallback="small_talk")
+            result.update(answer=self._small_talk(question, lang), fallback="small_talk")
             return result
 
         topic = out_of_scope_topic(search_q)
         if topic:
             steps.append(("Scope guard", f"{topic} is outside the skincare catalogue, so no search and no LLM"))
-            result.update(answer=SCOPE_MESSAGE.format(topic=topic), fallback="out_of_scope")
+            result.update(answer=localize(SCOPE_MESSAGE.format(topic=topic), "scope", lang, topic=topic),
+                          fallback="out_of_scope")
             return result
 
         med = medical_terms(search_q)
@@ -677,11 +687,12 @@ class SephoraRAG:
         steps.append(("Relevance check", f"best similarity {retrieved.best_similarity} "
                                          f"{'≥' if ok else '<'} threshold {SIMILARITY_THRESHOLD}{why}"))
         if not ok and not u["skincare"]:
-            result.update(answer=FALLBACK_MESSAGE, fallback="low_similarity")
+            result.update(answer=localize(FALLBACK_MESSAGE, "fallback", lang), fallback="low_similarity")
             return result
         if not retrieved.chunks:
-            result.update(answer=NO_MATCH_MESSAGE.format(constraints=hard_constraints(retrieved.filters)),
-                          fallback="no_match")
+            constraints = hard_constraints(retrieved.filters)
+            result.update(answer=localize(NO_MATCH_MESSAGE.format(constraints=constraints), "no_match", lang,
+                                          constraints=constraints), fallback="no_match")
             return result
 
         notes = result["notes"]
@@ -725,8 +736,15 @@ class SephoraRAG:
         messages.append({"role": "user", "content": user_turn})
         result["messages"] = messages
         if self.backend is None:
-            result.update(answer=self._product_list(retrieved, med), fallback="no_llm")
+            result.update(answer=self._product_list(retrieved, med, lang), fallback="no_llm")
         return result
+
+    @staticmethod
+    def _small_talk(question: str, lang: str) -> str:
+        en = small_talk_reply(question)
+        if has_devanagari(question):          # a Hindi greeting gets a Hindi reply whatever the setting
+            return localize(en, small_talk_key(question), HINDI)
+        return localize(en, small_talk_key(question), lang)
 
     def _with_previous(self, new: Retrieved, prev: Retrieved) -> Retrieved:
         """'Which of those is cheapest?': put the earlier products first (if they still satisfy the
@@ -742,16 +760,18 @@ class SephoraRAG:
                          filters={**new.filters, "reused_previous": len(carry)})
 
     @staticmethod
-    def _product_list(retrieved: Retrieved, medical: list[str]) -> str:
+    def _product_list(retrieved: Retrieved, medical: list[str], lang: str = ENGLISH) -> str:
         lines = []
         for i, c in enumerate(retrieved.chunks):
             m = c["meta"]
             rating = (f"{m['rating']:.1f}/5 from {m['reviews']} reviews" if m.get("has_rating", True)
                       else "no ratings yet")
             lines.append(f"- [{i + 1}] **{m['product_name']}** by {m['brand']} (${m['price']:.2f}, {rating})")
-        prefix = "**Please ask a dermatologist or doctor about medical questions.**\n\n" if medical else ""
-        return (prefix + "_No language model connected, so here are the matching products from the catalogue "
-                "(start Ollama or add an API key to get written answers):_\n\n" + "\n".join(lines))
+        prefix = localize("**Please ask a dermatologist or doctor about medical questions.**", "medical", lang) + "\n\n" \
+            if medical else ""
+        note = localize("_No language model connected, so here are the matching products from the catalogue "
+                        "(start Ollama or add an API key to get written answers):_", "no_llm_list", lang)
+        return prefix + note + "\n\n" + "\n".join(lines)
 
     def generate(self, result: dict) -> Iterator[str]:
         """Stream the answer text. Fills result["answer"], result["model"] and the timing when done."""
@@ -760,7 +780,9 @@ class SephoraRAG:
             return
         t0 = time.perf_counter()
         parts = []
-        for piece in self.backend.stream(SYSTEM_PROMPT, result["messages"], max_tokens=1500):
+        lang = result.get("language", ENGLISH)
+        system = SYSTEM_PROMPT + "\n\n" + prompt_rule(lang)
+        for piece in self.backend.stream(system, result["messages"], max_tokens=max_tokens(lang)):
             parts.append(piece)
             yield piece
         result["answer"] = "".join(parts).strip()
